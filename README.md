@@ -1,4 +1,4 @@
-# AWS VPC API
+# AWS VPC REST API Service
 
 This repository contains the code and infrastructure configuration for deploying a VPC management API on AWS using Lambda, API Gateway, DynamoDB, and Cognito.
 
