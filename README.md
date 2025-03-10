@@ -23,7 +23,7 @@ This repository contains the code and infrastructure configuration for deploying
     cd vpc-api
     ```
 
-2.  **Create a Virtual Environment (Recommended):**
+2.  **Create a Virtual Environment (Optional):**
 
     ```bash
     python -m venv venv
@@ -32,17 +32,17 @@ This repository contains the code and infrastructure configuration for deploying
 
 3.  **Install Lambda Dependencies:**
 
+    Install the packages in the same directory location as the code. 
+
     ```bash
     cd lambda
-    pip install -r requirements.txt
+    pip install -r requirements.txt -t . 
     ```
 
 4.  **Create Lambda Deployment Package:**
 
     ```bash
     zip -r vpc_api.zip vpc_api.py
-    zip -g vpc_api.zip venv/Lib/site-packages/*
-    cd ..
     ```
 
 5.  **Initialize Terraform:**
@@ -64,7 +64,6 @@ This repository contains the code and infrastructure configuration for deploying
 
     ```bash
     terraform output
-    terraform output cognito_user_pool_client_secret # Retrieve the sensitive client secret
     ```
 
 8.  **Create a Cognito User:**
@@ -75,13 +74,16 @@ This repository contains the code and infrastructure configuration for deploying
     aws cognito-idp sign-up --client-id <user_pool_client_id> --username <username> --password <password> --user-attributes Name=email,Value=<email>
     ```
 
-    * Then confirm the user.
+    * Then confirm the user. If email needs to be verified, the confirmation secret sent to user's email needs to be passed on. 
 
     ```bash
     aws cognito-idp admin-confirm-sign-up --user-pool-id <user_pool_id> --username <username>
     ```
+    ```
+    aws cognito-idp confirm-sign-up --client-id <user_pool_client_id> --username <username> --confirmation-code <confirmation-secret-code-received-in-mail>
+    ```
 
-9.  **Obtain an Authentication Token (AWS CLI) or CURL:**
+9.  **Obtain an Authentication Token (AWS CLI):**
 
     * Use the AWS CLI to authenticate and obtain an access token.
 
@@ -91,15 +93,8 @@ This repository contains the code and infrastructure configuration for deploying
       --auth-flow USER_PASSWORD_AUTH \
       --auth-parameters USERNAME=<username>,PASSWORD=<password>
     ```
-    * Using Curl
-    ```bash
-    curl -X POST \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -u "<your-client-id>:<your-client-secret>" \
-    "https://<your-cognito-domain>.auth.<region>[.amazoncognito.com/oauth2/token](https://www.google.com/search?q=https://.amazoncognito.com/oauth2/token)" \
-    -d "grant_type=authorization_code&code=<authorization-code>&redirect_uri=http://localhost:3000"
 
-    * Extract the `AccessToken` from the response.
+    * Extract the `IdToken` from the response to be used in the GET & POST request.
 
 10. **Test the API:**
 
@@ -109,7 +104,7 @@ This repository contains the code and infrastructure configuration for deploying
 
     ```bash
     curl -X POST \
-      -H "Authorization: Bearer <access_token>" \
+      -H "Authorization: <IdToken>" \
       -H "Content-Type: application/json" \
       -d '{
         "cidr_block": "10.0.0.0/16",
@@ -122,4 +117,13 @@ This repository contains the code and infrastructure configuration for deploying
 
     ```bash
     curl -X GET \
-      -H "Authorization: Bearer <access_token
+        -H "Authorization: Bearer <your_access_token>" \
+        "https://your-api-gateway-id.execute-api.us-west-2.amazonaws.com/prod/vpcs?vpc_id=<your_vpc_id>"
+    ```
+
+    ```bash
+    curl -X GET \
+        -H "Authorization: Bearer eyJraWQiOiJEXAMPLEKEYID...eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZW1haWwiOiJqb2huLmRvZUBleGFtcGxlLmNvbSJ9...EXAMPLE_SIGNATURE" \
+        "https://abcdef1234.execute-api.us-west-2.amazonaws.com/prod/vpcs?vpc_id=vpc-0123456789abcdef0"
+    ```
+
