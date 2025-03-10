@@ -3,6 +3,8 @@
 This repository contains the code and infrastructure configuration for deploying a VPC management API on AWS using Lambda, API Gateway, DynamoDB, and Cognito.
 
 ![AWS VPC API Architecture](docs/images/architecture.png)
+![VPC Fetch via REST API](docs/images/vpc-not-found.png)
+![VPC Creation via REST API](docs/images/vpc-created-by-post-request.png)
 
 ## Prerequisites
 
