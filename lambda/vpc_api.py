@@ -22,10 +22,11 @@ def lambda_handler(event, context):
         if event["resource"] == "/vpcs" and event["httpMethod"] == "POST":
             if "continue_creation" in event and event["continue_creation"]:
                 # Continue background creation
-                return continue_vpc_creation(event, user_email)
+                return continue_vpc_creation(event)
             else:
                 # Initial VPC creation
-                return create_vpc(event["body"], user_email)
+                user_email = event["requestContext"]["authorizer"]["claims"]["email"]
+                return create_vpc(event, user_email) #pass the event object
         elif event["resource"] == "/vpcs" and event["httpMethod"] == "GET":
             return get_vpcs(event["queryStringParameters"])
         else:
@@ -35,9 +36,9 @@ def lambda_handler(event, context):
         print(f"Error: {e}")
         return {"statusCode": 500, "body": json.dumps({"message": str(e)})}
         
-def create_vpc(body_json, user_email):
+def create_vpc(event, user_email): #accept event object
     print(f"Creating VPC for user: {user_email}")
-    body = json.loads(body_json)
+    body = json.loads(event["body"]) #get body from event
     cidr_block = body.get("cidr_block")
     region = body.get("region")
     print(f"Received CIDR: {cidr_block}, Region: {region}")
@@ -66,19 +67,18 @@ def create_vpc(body_json, user_email):
 
         # Asynchronous invocation for background processing
         lambda_client = boto3.client('lambda')
+        # pass the entire event and inject the continue_creation key
+        event_to_pass = {
+            **event,
+            "continue_creation": True,
+            "vpc_id": vpc_id,
+            "az_names": az_names
+        }
+
         lambda_client.invoke(
             FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'],
             InvocationType='Event', #asynchronous
-            Payload=json.dumps({
-                "resource": "/vpcs",
-                "httpMethod": "POST",
-                "continue_creation": True,
-                "vpc_id": vpc_id,
-                "region": region,
-                "cidr_block": cidr_block,
-                "user_email": user_email,
-                "az_names": az_names
-            })
+            Payload=json.dumps(event_to_pass)
         )
 
         return {"statusCode": 202, "body": json.dumps({"vpc_id": vpc_id, "message": "VPC creation initiated. Use GET /vpcs?vpc_id={vpc_id} to check status.".format(vpc_id=vpc_id)})}
@@ -90,11 +90,21 @@ def create_vpc(body_json, user_email):
         print(f"Error: {e}")
         return {"statusCode": 500, "body": json.dumps({"message": str(e)})}
 
-def continue_vpc_creation(event, user_email):
+def continue_vpc_creation(event):
     vpc_id = event["vpc_id"]
-    region = event["region"]
-    cidr_block = event["cidr_block"]
+    region = event.get("region") # get region from the event, if available
+    if not region:
+        body = json.loads(event.get("body", "{}")) #if region not directly available, get it from body
+        region = body.get("region")
+
+    # Handle cidr_block retrieval (from body if needed)
+    cidr_block = event.get("cidr_block")
+    if not cidr_block:
+        body = json.loads(event.get("body", "{}"))
+        cidr_block = body.get("cidr_block")
+        
     az_names = event["az_names"]
+    user_email = event.get("requestContext", {}).get("authorizer", {}).get("claims", {}).get("email") # get user email from the event, handle if requestContext is not present
     ec2_region = boto3.client("ec2", region_name=region)
 
     try:
