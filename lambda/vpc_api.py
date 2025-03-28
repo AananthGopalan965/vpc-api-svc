@@ -19,9 +19,14 @@ def lambda_handler(event, context):
         print(f"User email: {user_email}")
         print(f"Authorizer: {json.dumps(event['requestContext']['authorizer'])}")
 
-        # Route requests based on action
         if event["resource"] == "/vpcs" and event["httpMethod"] == "POST":
-            return create_vpc(event["body"], user_email)
+            if "continue_creation" in event and event["continue_creation"]:
+                # Continue background creation
+                return continue_vpc_creation(event)
+            else:
+                # Initial VPC creation
+                user_email = event["requestContext"]["authorizer"]["claims"]["email"]
+                return create_vpc(event, user_email) #pass the event object
         elif event["resource"] == "/vpcs" and event["httpMethod"] == "GET":
             return get_vpcs(event["queryStringParameters"])
         else:
@@ -30,10 +35,10 @@ def lambda_handler(event, context):
     except Exception as e:
         print(f"Error: {e}")
         return {"statusCode": 500, "body": json.dumps({"message": str(e)})}
-
-def create_vpc(body_json, user_email):
+        
+def create_vpc(event, user_email): #accept event object
     print(f"Creating VPC for user: {user_email}")
-    body = json.loads(body_json)
+    body = json.loads(event["body"]) #get body from event
     cidr_block = body.get("cidr_block")
     region = body.get("region")
     print(f"Received CIDR: {cidr_block}, Region: {region}")
@@ -60,32 +65,56 @@ def create_vpc(body_json, user_email):
         azs = ec2_region.describe_availability_zones(Filters=[{'Name': 'region-name', 'Values': [region]}])
         az_names = [az['ZoneName'] for az in azs['AvailabilityZones']]
 
-        # Create subnets
+        # Asynchronous invocation for background processing
+        lambda_client = boto3.client('lambda')
+        # pass the entire event and inject the continue_creation key
+        event_to_pass = {
+            **event,
+            "continue_creation": True,
+            "vpc_id": vpc_id,
+            "az_names": az_names
+        }
+
+        lambda_client.invoke(
+            FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'],
+            InvocationType='Event', #asynchronous
+            Payload=json.dumps(event_to_pass)
+        )
+
+        return {"statusCode": 202, "body": json.dumps({"vpc_id": vpc_id, "message": "VPC creation initiated. Use GET /vpcs?vpc_id={vpc_id} to check status.".format(vpc_id=vpc_id)})}
+
+    except ClientError as e:
+        print(f"AWS Error: {e}")
+        return {"statusCode": 500, "body": json.dumps({"message": str(e)})}
+    except Exception as e:
+        print(f"Error: {e}")
+        return {"statusCode": 500, "body": json.dumps({"message": str(e)})}
+
+def continue_vpc_creation(event):
+    vpc_id = event["vpc_id"]
+    region = event.get("region") # get region from the event, if available
+    if not region:
+        body = json.loads(event.get("body", "{}")) #if region not directly available, get it from body
+        region = body.get("region")
+
+    # Handle cidr_block retrieval (from body if needed)
+    cidr_block = event.get("cidr_block")
+    if not cidr_block:
+        body = json.loads(event.get("body", "{}"))
+        cidr_block = body.get("cidr_block")
+        
+    az_names = event["az_names"]
+    user_email = event.get("requestContext", {}).get("authorizer", {}).get("claims", {}).get("email") # get user email from the event, handle if requestContext is not present
+    ec2_region = boto3.client("ec2", region_name=region)
+
+    try:
         subnets = create_subnets(ec2_region, vpc_id, cidr_block, az_names)
-        print(f"Subnets: {subnets}")
-
-        # Create Internet Gateway and NAT Gateway
         igw_id = create_internet_gateway(ec2_region, vpc_id)
-        egress_subnet_id = None
-        for subnet_name, subnet_id in subnets.items():
-            if "egresssubnet" in subnet_name:
-                egress_subnet_id = subnet_id
-                break  # Stop searching once found
-
-        if egress_subnet_id:
-            nat_gateway_id = create_nat_gateway(ec2_region, egress_subnet_id)
-        else:
-            print("Error: Egress subnet not found.")
-            return {"statusCode": 500, "body": json.dumps({"message": "Egress subnet not found."})}
-
-
-        # Create route tables and associations
+        egress_subnet_id = next((subnet_id for subnet_name, subnet_id in subnets.items() if "egresssubnet" in subnet_name), None)
+        nat_gateway_id = create_nat_gateway(ec2_region, egress_subnet_id) if egress_subnet_id else None
         create_route_tables(ec2_region, vpc_id, subnets, igw_id, nat_gateway_id, az_names)
-
-        # Store VPC and user data
         store_vpc_data(vpc_id, cidr_block, region, subnets, user_email)
-
-        return {"statusCode": 201, "body": json.dumps({"vpc_id": vpc_id, "subnets": subnets})}
+        return {"statusCode": 200, "body": json.dumps({"message": "VPC creation completed."})}
 
     except ClientError as e:
         print(f"AWS Error: {e}")
@@ -125,34 +154,37 @@ def vpc_exists(cidr):
     return False
 
 def create_subnets(ec2_client, vpc_id, cidr_block, az_names):
-
     ip_network = ipaddress.ip_network(cidr_block)
     subnets = {}
 
     # Calculate subnet CIDR blocks using ipaddress
     original_prefix_len = ip_network.prefixlen
     original_num_addresses = ip_network.num_addresses
-    subnet_num_addresses = original_num_addresses / 4 # Always 4 subnets
+    subnet_num_addresses = original_num_addresses / 8  # 8 subnets
     subnet_prefix_len = 32 - int(math.log2(subnet_num_addresses))
     prefix_len_diff = subnet_prefix_len - original_prefix_len
-    
 
     if prefix_len_diff < 0:
         return {"error": "CIDR block too small for desired subnets"}
 
     subnet_cidr_blocks = [
         str(list(ip_network.subnets(prefixlen_diff=prefix_len_diff))[i])
-        for i in range(4)
+        for i in range(8)
     ]
 
-    subnet_names = [f"ingresssubnet{az_names[0]}", f"egresssubnet{az_names[1]}", f"privatesubnet{az_names[0]}", f"datasubnet{az_names[1]}"]
+    subnet_names = [
+        f"ingresssubnet{az_names[0]}", f"ingresssubnet{az_names[1]}",
+        f"egresssubnet{az_names[0]}", f"egresssubnet{az_names[1]}",
+        f"privatesubnet{az_names[0]}", f"privatesubnet{az_names[1]}",
+        f"datasubnet{az_names[0]}", f"datasubnet{az_names[1]}"
+    ]
 
-    # Create subnets 
+    # Create subnets
     for i in range(len(subnet_names)):
         subnet = ec2_client.create_subnet(
             VpcId=vpc_id,
             CidrBlock=subnet_cidr_blocks[i],
-            AvailabilityZone=az_names[i % 2], #Alternate between AZs
+            AvailabilityZone=az_names[i % 2],
             TagSpecifications=[
                 {"ResourceType": "subnet", "Tags": [{"Key": "Name", "Value": subnet_names[i]}]}
             ],
@@ -160,8 +192,7 @@ def create_subnets(ec2_client, vpc_id, cidr_block, az_names):
         subnets[subnet_names[i]] = subnet["Subnet"]["SubnetId"]
 
     return subnets
-            
-    
+
 def create_internet_gateway(ec2_client, vpc_id):
     igw = ec2_client.create_internet_gateway()
     igw_id = igw["InternetGateway"]["InternetGatewayId"]
@@ -177,22 +208,21 @@ def create_nat_gateway(ec2_client, egress_subnet_id):
     return nat_gateway_id
 
 def create_route_tables(ec2_client, vpc_id, subnets, igw_id, nat_gateway_id, az_names):
-    # Create public route table
+    # Public route table
     public_route_table = ec2_client.create_route_table(VpcId=vpc_id)
     public_route_table_id = public_route_table["RouteTable"]["RouteTableId"]
     ec2_client.create_route(RouteTableId=public_route_table_id, DestinationCidrBlock="0.0.0.0/0", GatewayId=igw_id)
-    ec2_client.associate_route_table(SubnetId=subnets[f"ingresssubnet{az_names[0]}"], RouteTableId=public_route_table_id)
+    for subnet_name, subnet_id in subnets.items():
+        if "ingresssubnet" in subnet_name:
+            ec2_client.associate_route_table(SubnetId=subnet_id, RouteTableId=public_route_table_id)
 
-    # Create private route table
+    # Private route table
     private_route_table = ec2_client.create_route_table(VpcId=vpc_id)
     private_route_table_id = private_route_table["RouteTable"]["RouteTableId"]
     ec2_client.create_route(RouteTableId=private_route_table_id, DestinationCidrBlock="0.0.0.0/0", NatGatewayId=nat_gateway_id)
-
-    # Associate private route table with private and data subnets
-    for az_name in az_names:
-        ec2_client.associate_route_table(SubnetId=subnets[f"privatesubnet{az_name}"], RouteTableId=private_route_table_id)
-        ec2_client.associate_route_table(SubnetId=subnets[f"datasubnet{az_name}"], RouteTableId=private_route_table_id)
-
+    for subnet_name, subnet_id in subnets.items():
+        if "privatesubnet" in subnet_name or "datasubnet" in subnet_name:
+            ec2_client.associate_route_table(SubnetId=subnet_id, RouteTableId=private_route_table_id)
     return None
 
 def store_vpc_data(vpc_id, cidr_block, region, subnets, user_email):
@@ -201,6 +231,8 @@ def store_vpc_data(vpc_id, cidr_block, region, subnets, user_email):
         "cidr_block": cidr_block,
         "region": region,
         "subnets": subnets,
-        "user_email": user_email
+        "user_email": user_email,
+        "status":"pending"
     }
     table.put_item(Item=item)
+            

@@ -4,7 +4,15 @@ This repository contains the code and infrastructure configuration for deploying
 
 ![AWS VPC API Architecture](docs/images/architecture.png)
 ![VPC Fetch via REST API](docs/images/vpc-not-found.png)
-![VPC Creation via REST API](docs/images/vpc-created-by-post-request.png)
+![VPC Creation POST REQUEST](docs/images/vpc-creation.png)
+![VPC Creation GET REQUEST](docs/images/Get-VPC-Details.png)
+![VPC Creation NOT FOUND](docs/images/vpc-not-found.png)
+
+## Overview
+
+This API allows users to create and retrieve VPCs. When a VPC creation request is received, the API initiates the VPC creation and returns a 202 Accepted response immediately. The actual creation of subnets, gateways, and route tables is handled asynchronously via Lambda invocation to prevent API Gateway timeouts.
+
+The VPC is created with 8 subnets, distributed across 2 Availability Zones for high availability. These subnets are categorized as ingress, egress, private, and data subnets, each with specific routing configurations.
 
 ## Prerequisites
 

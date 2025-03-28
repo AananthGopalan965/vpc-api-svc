@@ -28,7 +28,7 @@ resource "aws_cognito_user_pool" "user_pool" {
 }
 
 resource "aws_lambda_function" "vpc_api" {
-  filename      = "../lambda/lambda-v12.zip"
+  filename      = "../lambda/lambda-v14.zip"
   function_name = "VpcApi"
   role          = aws_iam_role.lambda_role.arn
   handler       = "vpc_api.lambda_handler"
@@ -172,6 +172,13 @@ resource "aws_iam_policy" "lambda_policy" {
         ],
         Effect: "Allow",
         Resource: "arn:aws:logs:*:*:*"
+      },
+      {
+        Action = [
+          "lambda:InvokeFunction"
+        ],
+        Effect   = "Allow",
+        Resource = aws_lambda_function.vpc_api.arn #Grant permission to invoke itself
       }
     ]
   })
